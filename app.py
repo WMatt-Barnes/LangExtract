@@ -33,6 +33,7 @@ def save_to_local_storage(key: str, value: str) -> None:
     <script>
         if (typeof(Storage) !== "undefined") {{
             localStorage.setItem("{key}", "{value}");
+            console.log("Saved to localStorage:", "{key}", "{value}");
         }}
     </script>
     """
@@ -46,7 +47,9 @@ def load_from_local_storage(key: str, default: str = "") -> str:
         if (typeof(Storage) !== "undefined") {{
             const value = localStorage.getItem("{key}");
             if (value !== null) {{
-                window.parent.postMessage({{type: "localStorage", key: "{key}", value: value}}, "*");
+                console.log("Loaded from localStorage:", "{key}", value);
+                // Store in sessionStorage for immediate access
+                sessionStorage.setItem("{key}", value);
             }}
         }}
     </script>
@@ -57,17 +60,34 @@ def load_from_local_storage(key: str, default: str = "") -> str:
 
 def get_persistent_value(key: str, default: str = "") -> str:
     """Get a value that persists across sessions using session state and localStorage"""
-    if key not in st.session_state:
-        # Try to get from localStorage first
-        stored_value = load_from_local_storage(key, default)
-        st.session_state[key] = stored_value
-    return st.session_state.get(key, default)
+    # First check session state (current session)
+    if key in st.session_state:
+        return st.session_state[key]
+    
+    # Then check if we have a stored value in session state
+    stored_key = f"stored_{key}"
+    if stored_key in st.session_state:
+        return st.session_state[stored_key]
+    
+    # Try to load from localStorage
+    stored_value = load_from_local_storage(key, default)
+    if stored_value != default:
+        # Store in session state for this session
+        st.session_state[stored_key] = stored_value
+        return stored_value
+    
+    return default
 
 
 def set_persistent_value(key: str, value: str) -> None:
     """Set a value that persists across sessions"""
+    # Store in current session
     st.session_state[key] = value
-    # Also save to localStorage for persistence
+    
+    # Store for future sessions
+    st.session_state[f"stored_{key}"] = value
+    
+    # Save to localStorage
     save_to_local_storage(key, value)
 
 
@@ -743,27 +763,41 @@ def main() -> None:
     st.title("LangExtract (Lite)")
     provider, model = get_provider_and_model()
 
-    # Session defaults for controls with persistence
+    # Initialize session state with persistent values
+    if "initialized" not in st.session_state:
+        # Load all persistent values at startup
+        st.session_state["max_pages"] = int(get_persistent_value("max_pages", "0"))
+        st.session_state["chunk_chars"] = int(get_persistent_value("chunk_chars", "15000"))
+        st.session_state["timeout_s"] = int(get_persistent_value("timeout_s", "60"))
+        st.session_state["max_tokens"] = int(get_persistent_value("max_tokens", "512"))
+        st.session_state["schema_prompt"] = get_persistent_value("schema_prompt", "extract assembly steps, torque values, and required tools")
+        st.session_state["provider"] = get_persistent_value("provider", provider)
+        st.session_state["initialized"] = True
+    
+    # Initialize other session state variables
     if "stop_requested" not in st.session_state:
         st.session_state["stop_requested"] = False
-    if "max_pages" not in st.session_state:
-        st.session_state["max_pages"] = int(get_persistent_value("max_pages", "0"))
-    if "chunk_chars" not in st.session_state:
-        st.session_state["chunk_chars"] = int(get_persistent_value("chunk_chars", "15000"))
-    if "timeout_s" not in st.session_state:
-        st.session_state["timeout_s"] = int(get_persistent_value("timeout_s", "60"))
-    if "max_tokens" not in st.session_state:
-        st.session_state["max_tokens"] = int(get_persistent_value("max_tokens", "512"))
-    if "schema_prompt" not in st.session_state:
-        st.session_state["schema_prompt"] = get_persistent_value("schema_prompt", "extract assembly steps, torque values, and required tools")
-    if "provider" not in st.session_state:
-        st.session_state["provider"] = get_persistent_value("provider", provider)
     if "change_openai_key" not in st.session_state:
         st.session_state["change_openai_key"] = False
     if "change_google_key" not in st.session_state:
         st.session_state["change_google_key"] = False
 
     with st.sidebar:
+        # Debug section (can be removed in production)
+        with st.expander("🔧 Debug Info", expanded=False):
+            st.write("**Session State:**")
+            for key, value in st.session_state.items():
+                if "key" in key.lower() and value:
+                    # Mask API keys for security
+                    masked_value = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
+                    st.write(f"{key}: {masked_value}")
+                else:
+                    st.write(f"{key}: {value}")
+            
+            st.write("**Environment:**")
+            st.write(f"Provider: {provider}")
+            st.write(f"Model: {model}")
+        
         st.markdown("**Model Provider**")
         provider_choice = st.selectbox(
             "Select Provider",
@@ -807,6 +841,18 @@ def main() -> None:
         st.markdown("---")
         st.markdown("**API Key Management**")
         
+        # Add clear keys option
+        if st.button("🗑️ Clear All Stored Keys", type="secondary"):
+            # Clear from session state
+            for key in list(st.session_state.keys()):
+                if "api_key" in key.lower() or "stored_" in key:
+                    del st.session_state[key]
+            # Clear from localStorage
+            save_to_local_storage("openai_api_key", "")
+            save_to_local_storage("google_api_key", "")
+            st.success("All stored API keys cleared!")
+            st.rerun()
+        
         if provider == "openai":
             # Get persistent API key
             stored_key = get_persistent_value("openai_api_key", "")
@@ -819,19 +865,29 @@ def main() -> None:
                 
                 if st.session_state.get("change_openai_key", False):
                     new_key = st.text_input("New OpenAI API Key", type="password", key="new_openai_key")
+                    remember_key = st.checkbox("Remember this key", value=True, key="remember_new_openai")
                     if new_key:
-                        set_persistent_value("openai_api_key", new_key)
+                        if remember_key:
+                            set_persistent_value("openai_api_key", new_key)
+                            st.success("OpenAI API key updated and saved permanently!")
+                        else:
+                            st.session_state["openai_api_key"] = new_key
+                            st.success("OpenAI API key updated for this session only!")
                         os.environ["OPENAI_API_KEY"] = new_key
-                        st.success("OpenAI API key updated and saved!")
                         st.session_state["change_openai_key"] = False
                         st.rerun()
             else:
-                st.info("Enter your OpenAI API key (will be remembered)")
+                st.info("Enter your OpenAI API key")
                 key_in = st.text_input("OpenAI API Key", type="password", key="openai_key_input")
+                remember_key = st.checkbox("Remember this key", value=True, key="remember_openai")
                 if key_in:
-                    set_persistent_value("openai_api_key", key_in)
+                    if remember_key:
+                        set_persistent_value("openai_api_key", key_in)
+                        st.success("OpenAI API key saved and will be remembered!")
+                    else:
+                        st.session_state["openai_api_key"] = key_in
+                        st.success("OpenAI API key saved for this session only!")
                     os.environ["OPENAI_API_KEY"] = key_in
-                    st.success("OpenAI API key saved and will be remembered!")
                     st.rerun()
         else:
             # Get persistent API key
@@ -845,19 +901,29 @@ def main() -> None:
                 
                 if st.session_state.get("change_google_key", False):
                     new_key = st.text_input("New Google API Key", type="password", key="new_google_key")
+                    remember_key = st.checkbox("Remember this key", value=True, key="remember_new_google")
                     if new_key:
-                        set_persistent_value("google_api_key", new_key)
+                        if remember_key:
+                            set_persistent_value("google_api_key", new_key)
+                            st.success("Google API key updated and saved permanently!")
+                        else:
+                            st.session_state["google_api_key"] = new_key
+                            st.success("Google API key updated for this session only!")
                         os.environ["GOOGLE_API_KEY"] = new_key
-                        st.success("Google API key updated and saved!")
                         st.session_state["change_google_key"] = False
                         st.rerun()
             else:
-                st.info("Enter your Google API key (will be remembered)")
+                st.info("Enter your Google API key")
                 key_in = st.text_input("Google API Key", type="password", key="google_key_input")
+                remember_key = st.checkbox("Remember this key", value=True, key="remember_google")
                 if key_in:
-                    set_persistent_value("google_api_key", key_in)
+                    if remember_key:
+                        set_persistent_value("google_api_key", key_in)
+                        st.success("Google API key saved and will be remembered!")
+                    else:
+                        st.session_state["google_api_key"] = key_in
+                        st.success("Google API key saved for this session only!")
                     os.environ["GOOGLE_API_KEY"] = key_in
-                    st.success("Google API key saved and will be remembered!")
                     st.rerun()
 
     source_mode = st.radio("PDF Source", options=["Upload", "File path"], horizontal=True)
