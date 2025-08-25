@@ -9,13 +9,66 @@ from typing import Dict, List, Tuple, Any
 
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv, find_dotenv, set_key
+try:
+    from dotenv import load_dotenv, find_dotenv, set_key
+except ImportError:
+    # Fallback for environments where dotenv might not be available
+    def load_dotenv(*args, **kwargs):
+        pass
+    def find_dotenv(*args, **kwargs):
+        return None
+    def set_key(*args, **kwargs):
+        pass
 from PyPDF2 import PdfReader
 
 
 def initialize_environment() -> None:
     load_dotenv()
     st.set_page_config(page_title="LangExtract (Lite)", layout="wide")
+
+
+def save_to_local_storage(key: str, value: str) -> None:
+    """Save a value to browser localStorage using JavaScript"""
+    js_code = f"""
+    <script>
+        if (typeof(Storage) !== "undefined") {{
+            localStorage.setItem("{key}", "{value}");
+        }}
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+
+
+def load_from_local_storage(key: str, default: str = "") -> str:
+    """Load a value from browser localStorage using JavaScript"""
+    js_code = f"""
+    <script>
+        if (typeof(Storage) !== "undefined") {{
+            const value = localStorage.getItem("{key}");
+            if (value !== null) {{
+                window.parent.postMessage({{type: "localStorage", key: "{key}", value: value}}, "*");
+            }}
+        }}
+    </script>
+    """
+    st.components.v1.html(js_code, height=0)
+    return default
+
+
+def get_persistent_value(key: str, default: str = "") -> str:
+    """Get a value that persists across sessions using session state and localStorage"""
+    if key not in st.session_state:
+        # Try to get from localStorage first
+        stored_value = load_from_local_storage(key, default)
+        st.session_state[key] = stored_value
+    return st.session_state.get(key, default)
+
+
+def set_persistent_value(key: str, value: str) -> None:
+    """Set a value that persists across sessions"""
+    st.session_state[key] = value
+    # Also save to localStorage for persistence
+    save_to_local_storage(key, value)
 
 
 def read_pdf_pages(uploaded_file: io.BytesIO, password: str | None = None) -> List[Dict[str, Any]]:
@@ -81,13 +134,17 @@ def get_provider_and_model() -> Tuple[str, str]:
 
 
 def _ensure_env_file() -> str:
-    env_path = find_dotenv(usecwd=True)
-    if not env_path:
-        env_path = os.path.join(os.getcwd(), ".env")
-    if not os.path.exists(env_path):
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write("")
-    return env_path
+    try:
+        env_path = find_dotenv(usecwd=True)
+        if not env_path:
+            env_path = os.path.join(os.getcwd(), ".env")
+        if not os.path.exists(env_path):
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write("")
+        return env_path
+    except Exception:
+        # Fallback for environments where .env file operations aren't needed
+        return os.path.join(os.getcwd(), ".env")
 
 
 def call_openai(model: str, system_prompt: str, user_prompt: str, timeout_s: int | None = None, max_tokens: int | None = None, force_json: bool = False) -> str:
@@ -686,21 +743,21 @@ def main() -> None:
     st.title("LangExtract (Lite)")
     provider, model = get_provider_and_model()
 
-    # Session defaults for controls
+    # Session defaults for controls with persistence
     if "stop_requested" not in st.session_state:
         st.session_state["stop_requested"] = False
     if "max_pages" not in st.session_state:
-        st.session_state["max_pages"] = 0
+        st.session_state["max_pages"] = int(get_persistent_value("max_pages", "0"))
     if "chunk_chars" not in st.session_state:
-        st.session_state["chunk_chars"] = 15000
+        st.session_state["chunk_chars"] = int(get_persistent_value("chunk_chars", "15000"))
     if "timeout_s" not in st.session_state:
-        st.session_state["timeout_s"] = 60
+        st.session_state["timeout_s"] = int(get_persistent_value("timeout_s", "60"))
     if "max_tokens" not in st.session_state:
-        st.session_state["max_tokens"] = 512
+        st.session_state["max_tokens"] = int(get_persistent_value("max_tokens", "512"))
     if "schema_prompt" not in st.session_state:
-        st.session_state["schema_prompt"] = "extract assembly steps, torque values, and required tools"
+        st.session_state["schema_prompt"] = get_persistent_value("schema_prompt", "extract assembly steps, torque values, and required tools")
     if "provider" not in st.session_state:
-        st.session_state["provider"] = provider
+        st.session_state["provider"] = get_persistent_value("provider", provider)
     if "change_openai_key" not in st.session_state:
         st.session_state["change_openai_key"] = False
     if "change_google_key" not in st.session_state:
@@ -717,6 +774,7 @@ def main() -> None:
         
         # Update provider if changed
         if provider_choice != provider:
+            set_persistent_value("provider", provider_choice)
             st.session_state["provider"] = provider_choice
             st.rerun()
         
@@ -739,28 +797,21 @@ def main() -> None:
         # Update model if changed
         if model_choice != model:
             if provider == "openai":
+                set_persistent_value("openai_model", model_choice)
                 os.environ["OPENAI_MODEL"] = model_choice
-                try:
-                    env_path = _ensure_env_file()
-                    set_key(env_path, "OPENAI_MODEL", model_choice)
-                    load_dotenv(override=True)
-                except Exception:
-                    pass
             else:
+                set_persistent_value("gemini_model", model_choice)
                 os.environ["GEMINI_MODEL"] = model_choice
-                try:
-                    env_path = _ensure_env_file()
-                    set_key(env_path, "GEMINI_MODEL", model_choice)
-                    load_dotenv(override=True)
-                except Exception:
-                    pass
             st.rerun()
 
         st.markdown("---")
         st.markdown("**API Key Management**")
         
         if provider == "openai":
-            has_key = bool(os.getenv("OPENAI_API_KEY"))
+            # Get persistent API key
+            stored_key = get_persistent_value("openai_api_key", "")
+            has_key = bool(stored_key)
+            
             if has_key:
                 st.success("✅ OpenAI API key configured")
                 if st.button("🔄 Change OpenAI API Key"):
@@ -769,31 +820,24 @@ def main() -> None:
                 if st.session_state.get("change_openai_key", False):
                     new_key = st.text_input("New OpenAI API Key", type="password", key="new_openai_key")
                     if new_key:
+                        set_persistent_value("openai_api_key", new_key)
                         os.environ["OPENAI_API_KEY"] = new_key
-                        try:
-                            env_path = _ensure_env_file()
-                            set_key(env_path, "OPENAI_API_KEY", new_key)
-                            load_dotenv(override=True)
-                            st.success("OpenAI API key updated!")
-                            st.session_state["change_openai_key"] = False
-                            st.rerun()
-                        except Exception as exc:
-                            st.warning(f"Saved for this session only (could not write .env): {exc}")
-            else:
-                st.info("OPENAI_API_KEY not set")
-                key_in = st.text_input("OpenAI API Key", type="password")
-                if key_in:
-                    os.environ["OPENAI_API_KEY"] = key_in
-                    try:
-                        env_path = _ensure_env_file()
-                        set_key(env_path, "OPENAI_API_KEY", key_in)
-                        load_dotenv(override=True)
-                        st.success("OpenAI API key saved to .env.")
+                        st.success("OpenAI API key updated and saved!")
+                        st.session_state["change_openai_key"] = False
                         st.rerun()
-                    except Exception as exc:
-                        st.warning(f"Saved for this session only (could not write .env): {exc}")
+            else:
+                st.info("Enter your OpenAI API key (will be remembered)")
+                key_in = st.text_input("OpenAI API Key", type="password", key="openai_key_input")
+                if key_in:
+                    set_persistent_value("openai_api_key", key_in)
+                    os.environ["OPENAI_API_KEY"] = key_in
+                    st.success("OpenAI API key saved and will be remembered!")
+                    st.rerun()
         else:
-            has_key = bool(os.getenv("GOOGLE_API_KEY"))
+            # Get persistent API key
+            stored_key = get_persistent_value("google_api_key", "")
+            has_key = bool(stored_key)
+            
             if has_key:
                 st.success("✅ Google API key configured")
                 if st.button("🔄 Change Google API Key"):
@@ -802,29 +846,19 @@ def main() -> None:
                 if st.session_state.get("change_google_key", False):
                     new_key = st.text_input("New Google API Key", type="password", key="new_google_key")
                     if new_key:
+                        set_persistent_value("google_api_key", new_key)
                         os.environ["GOOGLE_API_KEY"] = new_key
-                        try:
-                            env_path = _ensure_env_file()
-                            set_key(env_path, "GOOGLE_API_KEY", new_key)
-                            load_dotenv(override=True)
-                            st.success("Google API key updated!")
-                            st.session_state["change_google_key"] = False
-                            st.rerun()
-                        except Exception as exc:
-                            st.warning(f"Saved for this session only (could not write .env): {exc}")
-            else:
-                st.info("GOOGLE_API_KEY not set")
-                key_in = st.text_input("Google API Key", type="password")
-                if key_in:
-                    os.environ["GOOGLE_API_KEY"] = key_in
-                    try:
-                        env_path = _ensure_env_file()
-                        set_key(env_path, "GOOGLE_API_KEY", key_in)
-                        load_dotenv(override=True)
-                        st.success("Google API key saved to .env.")
+                        st.success("Google API key updated and saved!")
+                        st.session_state["change_google_key"] = False
                         st.rerun()
-                    except Exception as exc:
-                        st.warning(f"Saved for this session only (could not write .env): {exc}")
+            else:
+                st.info("Enter your Google API key (will be remembered)")
+                key_in = st.text_input("Google API Key", type="password", key="google_key_input")
+                if key_in:
+                    set_persistent_value("google_api_key", key_in)
+                    os.environ["GOOGLE_API_KEY"] = key_in
+                    st.success("Google API key saved and will be remembered!")
+                    st.rerun()
 
     source_mode = st.radio("PDF Source", options=["Upload", "File path"], horizontal=True)
     pdf_password = st.text_input("PDF password (optional)", type="password")
@@ -835,16 +869,19 @@ def main() -> None:
             preset = get_preset_settings("small")
             for k, v in preset.items():
                 st.session_state[k] = v
+                set_persistent_value(k, str(v))
             st.rerun()
         if col2.button("Standard files", use_container_width=True):
             preset = get_preset_settings("standard")
             for k, v in preset.items():
                 st.session_state[k] = v
+                set_persistent_value(k, str(v))
             st.rerun()
         if col3.button("Large files", use_container_width=True):
             preset = get_preset_settings("large")
             for k, v in preset.items():
                 st.session_state[k] = v
+                set_persistent_value(k, str(v))
             st.rerun()
         
         st.markdown("---")
@@ -895,6 +932,7 @@ def main() -> None:
         value=st.session_state.get("schema_prompt", "extract assembly steps, torque values, and required tools"),
         height=120,
         key="schema_prompt",
+        on_change=lambda: set_persistent_value("schema_prompt", st.session_state.get("schema_prompt", "")),
     )
 
     col_run, col_stop, col_rerun = st.columns([1, 1, 1])
