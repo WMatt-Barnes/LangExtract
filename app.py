@@ -91,7 +91,7 @@ def set_persistent_value(key: str, value: str) -> None:
     save_to_local_storage(key, value)
 
 
-def read_pdf_pages(uploaded_file: io.BytesIO, password: str | None = None) -> List[Dict[str, Any]]:
+def read_pdf_pages(uploaded_file: io.BytesIO, password: str = None) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
     try:
         reader = PdfReader(uploaded_file)
@@ -167,8 +167,11 @@ def _ensure_env_file() -> str:
         return os.path.join(os.getcwd(), ".env")
 
 
-def call_openai(model: str, system_prompt: str, user_prompt: str, timeout_s: int | None = None, max_tokens: int | None = None, force_json: bool = False) -> str:
-    from openai import OpenAI
+def call_openai(model: str, system_prompt: str, user_prompt: str, timeout_s: int = None, max_tokens: int = None, force_json: bool = False) -> str:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("OpenAI library not installed. Run: pip install openai")
 
     client = OpenAI()
     
@@ -180,31 +183,54 @@ def call_openai(model: str, system_prompt: str, user_prompt: str, timeout_s: int
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.0,
-        "timeout": timeout_s,
-        "max_tokens": max_tokens,
     }
+    
+    # Only add optional parameters if they have values
+    if timeout_s is not None:
+        api_params["timeout"] = timeout_s
+    if max_tokens is not None:
+        api_params["max_tokens"] = max_tokens
     
     # Only add response_format for JSON responses
     if force_json:
         api_params["response_format"] = {"type": "json_object"}
     
-    completion = client.chat.completions.create(**api_params)
-    return completion.choices[0].message.content or ""
+    try:
+        completion = client.chat.completions.create(**api_params)
+        return completion.choices[0].message.content or ""
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API call failed: {e}")
 
 
-def call_gemini(model: str, system_prompt: str, user_prompt: str, timeout_s: int | None = None, max_tokens: int | None = None) -> str:
-    import google.generativeai as genai
+def call_gemini(model: str, system_prompt: str, user_prompt: str, timeout_s: int = None, max_tokens: int = None) -> str:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise ImportError("Google Generative AI library not installed. Run: pip install google-generativeai")
 
-    genai.configure(api_key=os.environ.get("GOOGLE_API_KEY", ""))
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY environment variable not set")
+
+    genai.configure(api_key=api_key)
     generation_config = {
         "temperature": 0.0,
         "response_mime_type": "application/json",
-        "max_output_tokens": max_tokens or 512,
     }
-    model_ref = genai.GenerativeModel(model_name=model, generation_config=generation_config)
-    prompt = f"{system_prompt}\n\n{user_prompt}"
-    response = model_ref.generate_content(prompt)
-    return response.text or ""
+    
+    # Only add max_output_tokens if specified
+    if max_tokens is not None:
+        generation_config["max_output_tokens"] = max_tokens
+    else:
+        generation_config["max_output_tokens"] = 512
+    
+    try:
+        model_ref = genai.GenerativeModel(model_name=model, generation_config=generation_config)
+        prompt = f"{system_prompt}\n\n{user_prompt}"
+        response = model_ref.generate_content(prompt)
+        return response.text or ""
+    except Exception as e:
+        raise RuntimeError(f"Gemini API call failed: {e}")
 
 
 def extract_json_block(text: str) -> str:
@@ -758,100 +784,139 @@ Write in clear, professional language that a technical professional would unders
 
 
 def main() -> None:
-    initialize_environment()
+    try:
+        initialize_environment()
+    except Exception as exc:
+        st.error(f"❌ **Environment initialization failed**: {exc}")
+        st.info("Please check your configuration and refresh the page.")
+        return
 
     st.title("LangExtract (Lite)")
-    provider, model = get_provider_and_model()
+    try:
+        provider, model = get_provider_and_model()
+    except Exception as exc:
+        st.error(f"❌ **Provider configuration failed**: {exc}")
+        st.info("Using default OpenAI configuration.")
+        provider, model = "openai", "gpt-4o-mini"
 
     # Initialize session state with persistent values
-    if "initialized" not in st.session_state:
-        # Load all persistent values at startup
-        st.session_state["max_pages"] = int(get_persistent_value("max_pages", "0"))
-        st.session_state["chunk_chars"] = int(get_persistent_value("chunk_chars", "15000"))
-        st.session_state["timeout_s"] = int(get_persistent_value("timeout_s", "60"))
-        st.session_state["max_tokens"] = int(get_persistent_value("max_tokens", "512"))
-        st.session_state["schema_prompt"] = get_persistent_value("schema_prompt", "extract assembly steps, torque values, and required tools")
-        st.session_state["provider"] = get_persistent_value("provider", provider)
-        st.session_state["initialized"] = True
-    
-    # Initialize other session state variables
-    if "stop_requested" not in st.session_state:
-        st.session_state["stop_requested"] = False
-    if "change_openai_key" not in st.session_state:
-        st.session_state["change_openai_key"] = False
-    if "change_google_key" not in st.session_state:
-        st.session_state["change_google_key"] = False
+    try:
+        if "initialized" not in st.session_state:
+            # Load all persistent values at startup
+            st.session_state["max_pages"] = int(get_persistent_value("max_pages", "0"))
+            st.session_state["chunk_chars"] = int(get_persistent_value("chunk_chars", "15000"))
+            st.session_state["timeout_s"] = int(get_persistent_value("timeout_s", "60"))
+            st.session_state["max_tokens"] = int(get_persistent_value("max_tokens", "512"))
+            st.session_state["schema_prompt"] = get_persistent_value("schema_prompt", "extract assembly steps, torque values, and required tools")
+            st.session_state["provider"] = get_persistent_value("provider", provider)
+            st.session_state["initialized"] = True
+        
+        # Initialize other session state variables
+        if "stop_requested" not in st.session_state:
+            st.session_state["stop_requested"] = False
+        if "change_openai_key" not in st.session_state:
+            st.session_state["change_openai_key"] = False
+        if "change_google_key" not in st.session_state:
+            st.session_state["change_google_key"] = False
+    except Exception as exc:
+        st.error(f"❌ **Session state initialization failed**: {exc}")
+        st.info("Please refresh the page to try again.")
+        return
 
     with st.sidebar:
         # Debug section (can be removed in production)
         with st.expander("🔧 Debug Info", expanded=False):
-            st.write("**Session State:**")
-            for key, value in st.session_state.items():
-                if "key" in key.lower() and value:
-                    # Mask API keys for security
-                    masked_value = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
-                    st.write(f"{key}: {masked_value}")
-                else:
-                    st.write(f"{key}: {value}")
-            
-            st.write("**Environment:**")
-            st.write(f"Provider: {provider}")
-            st.write(f"Model: {model}")
+            try:
+                st.write("**Session State:**")
+                for key, value in st.session_state.items():
+                    if "key" in key.lower() and value:
+                        # Mask API keys for security
+                        masked_value = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
+                        st.write(f"{key}: {masked_value}")
+                    else:
+                        st.write(f"{key}: {value}")
+                
+                st.write("**Environment:**")
+                st.write(f"Provider: {provider}")
+                st.write(f"Model: {model}")
+            except Exception as exc:
+                st.error(f"❌ **Debug info failed**: {exc}")
+                st.info("Debug information unavailable.")
         
         st.markdown("**Model Provider**")
-        provider_choice = st.selectbox(
-            "Select Provider",
-            options=["openai", "gemini"],
-            index=0 if provider == "openai" else 1,
-            key="provider_choice"
-        )
+        try:
+            provider_choice = st.selectbox(
+                "Select Provider",
+                options=["openai", "gemini"],
+                index=0 if provider == "openai" else 1,
+                key="provider_choice"
+            )
+        except Exception as exc:
+            st.error(f"❌ **Provider selection failed**: {exc}")
+            provider_choice = provider
         
         # Update provider if changed
         if provider_choice != provider:
-            set_persistent_value("provider", provider_choice)
-            st.session_state["provider"] = provider_choice
-            st.rerun()
+            try:
+                set_persistent_value("provider", provider_choice)
+                st.session_state["provider"] = provider_choice
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Provider change failed**: {exc}")
+                st.info("Please try refreshing the page.")
         
         st.markdown("**Model**")
-        if provider == "openai":
-            model_choice = st.selectbox(
-                "OpenAI Model",
-                options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-                index=0 if model == "gpt-4o-mini" else 1,
-                key="openai_model_choice"
-            )
-        else:
-            model_choice = st.selectbox(
-                "Gemini Model",
-                options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
-                index=0 if model == "gemini-1.5-flash" else 1,
-                key="gemini_model_choice"
-            )
+        try:
+            if provider == "openai":
+                model_choice = st.selectbox(
+                    "OpenAI Model",
+                    options=["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+                    index=0 if model == "gpt-4o-mini" else 1,
+                    key="openai_model_choice"
+                )
+            else:
+                model_choice = st.selectbox(
+                    "Gemini Model",
+                    options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"],
+                    index=0 if model == "gemini-1.5-flash" else 1,
+                    key="gemini_model_choice"
+                )
+        except Exception as exc:
+            st.error(f"❌ **Model selection failed**: {exc}")
+            model_choice = model
         
         # Update model if changed
         if model_choice != model:
-            if provider == "openai":
-                set_persistent_value("openai_model", model_choice)
-                os.environ["OPENAI_MODEL"] = model_choice
-            else:
-                set_persistent_value("gemini_model", model_choice)
-                os.environ["GEMINI_MODEL"] = model_choice
-            st.rerun()
+            try:
+                if provider == "openai":
+                    set_persistent_value("openai_model", model_choice)
+                    os.environ["OPENAI_MODEL"] = model_choice
+                else:
+                    set_persistent_value("gemini_model", model_choice)
+                    os.environ["GEMINI_MODEL"] = model_choice
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Model change failed**: {exc}")
+                st.info("Please try refreshing the page.")
 
         st.markdown("---")
         st.markdown("**API Key Management**")
         
         # Add clear keys option
         if st.button("🗑️ Clear All Stored Keys", type="secondary"):
-            # Clear from session state
-            for key in list(st.session_state.keys()):
-                if "api_key" in key.lower() or "stored_" in key:
-                    del st.session_state[key]
-            # Clear from localStorage
-            save_to_local_storage("openai_api_key", "")
-            save_to_local_storage("google_api_key", "")
-            st.success("All stored API keys cleared!")
-            st.rerun()
+            try:
+                # Clear from session state
+                for key in list(st.session_state.keys()):
+                    if "api_key" in key.lower() or "stored_" in key:
+                        del st.session_state[key]
+                # Clear from localStorage
+                save_to_local_storage("openai_api_key", "")
+                save_to_local_storage("google_api_key", "")
+                st.success("All stored API keys cleared!")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Key clearing failed**: {exc}")
+                st.info("Please try refreshing the page.")
         
         if provider == "openai":
             # Get persistent API key
@@ -861,34 +926,45 @@ def main() -> None:
             if has_key:
                 st.success("✅ OpenAI API key configured")
                 if st.button("🔄 Change OpenAI API Key"):
-                    st.session_state["change_openai_key"] = True
+                    try:
+                        st.session_state["change_openai_key"] = True
+                    except Exception as exc:
+                        st.error(f"❌ **Button action failed**: {exc}")
                 
                 if st.session_state.get("change_openai_key", False):
-                    new_key = st.text_input("New OpenAI API Key", type="password", key="new_openai_key")
-                    remember_key = st.checkbox("Remember this key", value=True, key="remember_new_openai")
-                    if new_key:
-                        if remember_key:
-                            set_persistent_value("openai_api_key", new_key)
-                            st.success("OpenAI API key updated and saved permanently!")
-                        else:
-                            st.session_state["openai_api_key"] = new_key
-                            st.success("OpenAI API key updated for this session only!")
-                        os.environ["OPENAI_API_KEY"] = new_key
-                        st.session_state["change_openai_key"] = False
-                        st.rerun()
+                    try:
+                        new_key = st.text_input("New OpenAI API Key", type="password", key="new_openai_key")
+                        remember_key = st.checkbox("Remember this key", value=True, key="remember_new_openai")
+                        if new_key:
+                            if remember_key:
+                                set_persistent_value("openai_api_key", new_key)
+                                st.success("OpenAI API key updated and saved.")
+                            else:
+                                st.session_state["openai_api_key"] = new_key
+                                st.success("OpenAI API key updated.")
+                            os.environ["OPENAI_API_KEY"] = new_key
+                            st.session_state["change_openai_key"] = False
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"❌ **API key update failed**: {exc}")
+                        st.info("Please try refreshing the page.")
             else:
                 st.info("Enter your OpenAI API key")
-                key_in = st.text_input("OpenAI API Key", type="password", key="openai_key_input")
-                remember_key = st.checkbox("Remember this key", value=True, key="remember_openai")
-                if key_in:
-                    if remember_key:
-                        set_persistent_value("openai_api_key", key_in)
-                        st.success("OpenAI API key saved and will be remembered!")
-                    else:
-                        st.session_state["openai_api_key"] = key_in
-                        st.success("OpenAI API key saved for this session only!")
-                    os.environ["OPENAI_API_KEY"] = key_in
-                    st.rerun()
+                try:
+                    key_in = st.text_input("OpenAI API Key", type="password", key="openai_key_input")
+                    remember_key = st.checkbox("Remember this key", value=True, key="remember_openai")
+                    if key_in:
+                        if remember_key:
+                            set_persistent_value("openai_api_key", key_in)
+                            st.success("OpenAI API key saved.")
+                        else:
+                            st.session_state["openai_api_key"] = key_in
+                            st.success("OpenAI API key saved.")
+                        os.environ["OPENAI_API_KEY"] = key_in
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"❌ **API key input failed**: {exc}")
+                    st.info("Please try refreshing the page.")
         else:
             # Get persistent API key
             stored_key = get_persistent_value("google_api_key", "")
@@ -897,58 +973,84 @@ def main() -> None:
             if has_key:
                 st.success("✅ Google API key configured")
                 if st.button("🔄 Change Google API Key"):
-                    st.session_state["change_google_key"] = True
+                    try:
+                        st.session_state["change_google_key"] = True
+                    except Exception as exc:
+                        st.error(f"❌ **Button action failed**: {exc}")
                 
                 if st.session_state.get("change_google_key", False):
-                    new_key = st.text_input("New Google API Key", type="password", key="new_google_key")
-                    remember_key = st.checkbox("Remember this key", value=True, key="remember_new_google")
-                    if new_key:
-                        if remember_key:
-                            set_persistent_value("google_api_key", new_key)
-                            st.success("Google API key updated and saved permanently!")
-                        else:
-                            st.session_state["google_api_key"] = new_key
-                            st.success("Google API key updated for this session only!")
-                        os.environ["GOOGLE_API_KEY"] = new_key
-                        st.session_state["change_google_key"] = False
-                        st.rerun()
+                    try:
+                        new_key = st.text_input("New Google API Key", type="password", key="new_google_key")
+                        remember_key = st.checkbox("Remember this key", value=True, key="remember_new_google")
+                        if new_key:
+                            if remember_key:
+                                set_persistent_value("google_api_key", new_key)
+                                st.success("Google API key updated.")
+                            else:
+                                st.session_state["google_api_key"] = new_key
+                                st.success("Google API key updated.")
+                            os.environ["GOOGLE_API_KEY"] = new_key
+                            st.session_state["change_google_key"] = False
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"❌ **API key update failed**: {exc}")
+                        st.info("Please try refreshing the page.")
             else:
                 st.info("Enter your Google API key")
-                key_in = st.text_input("Google API Key", type="password", key="google_key_input")
-                remember_key = st.checkbox("Remember this key", value=True, key="remember_google")
-                if key_in:
-                    if remember_key:
-                        set_persistent_value("google_api_key", key_in)
-                        st.success("Google API key saved and will be remembered!")
-                    else:
-                        st.session_state["google_api_key"] = key_in
-                        st.success("Google API key saved for this session only!")
-                    os.environ["GOOGLE_API_KEY"] = key_in
-                    st.rerun()
+                try:
+                    key_in = st.text_input("Google API Key", type="password", key="google_key_input")
+                    remember_key = st.checkbox("Remember this key", value=True, key="remember_google")
+                    if key_in:
+                        if remember_key:
+                            set_persistent_value("google_api_key", key_in)
+                            st.success("Google API key saved.")
+                        else:
+                            st.session_state["google_api_key"] = key_in
+                            st.success("Google API key saved.")
+                        os.environ["GOOGLE_API_KEY"] = key_in
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"❌ **API key input failed**: {exc}")
+                    st.info("Please try refreshing the page.")
 
-    source_mode = st.radio("PDF Source", options=["Upload", "File path"], horizontal=True)
-    pdf_password = st.text_input("PDF password (optional)", type="password")
-    with st.expander("Performance settings", expanded=False):
-        # Preset buttons
-        col1, col2, col3 = st.columns(3)
+    try:
+        source_mode = st.radio("PDF Source", options=["Upload", "File path"], horizontal=True)
+        pdf_password = st.text_input("PDF password (optional)", type="password")
+    except Exception as exc:
+        st.error(f"❌ **Source mode selection failed**: {exc}")
+        source_mode = "Upload"
+        pdf_password = ""
+    try:
+        with st.expander("Performance settings", expanded=False):
+            # Preset buttons
+            col1, col2, col3 = st.columns(3)
         if col1.button("Small files", use_container_width=True):
-            preset = get_preset_settings("small")
-            for k, v in preset.items():
-                st.session_state[k] = v
-                set_persistent_value(k, str(v))
-            st.rerun()
+            try:
+                preset = get_preset_settings("small")
+                for k, v in preset.items():
+                    st.session_state[k] = v
+                    set_persistent_value(k, str(v))
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Preset application failed**: {exc}")
         if col2.button("Standard files", use_container_width=True):
-            preset = get_preset_settings("standard")
-            for k, v in preset.items():
-                st.session_state[k] = v
-                set_persistent_value(k, str(v))
-            st.rerun()
+            try:
+                preset = get_preset_settings("standard")
+                for k, v in preset.items():
+                    st.session_state[k] = v
+                    set_persistent_value(k, str(v))
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Preset application failed**: {exc}")
         if col3.button("Large files", use_container_width=True):
-            preset = get_preset_settings("large")
-            for k, v in preset.items():
-                st.session_state[k] = v
-                set_persistent_value(k, str(v))
-            st.rerun()
+            try:
+                preset = get_preset_settings("large")
+                for k, v in preset.items():
+                    st.session_state[k] = v
+                    set_persistent_value(k, str(v))
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ **Preset application failed**: {exc}")
         
         st.markdown("---")
         
@@ -957,29 +1059,40 @@ def main() -> None:
         col_opt1, col_opt2 = st.columns(2)
         
         with col_opt1:
-            max_workers = st.number_input(
-                "Max parallel workers", min_value=1, max_value=8, step=1,
-                value=4, help="Number of chunks to process simultaneously. Higher = faster but may hit rate limits."
-            )
-            chunk_chars = st.number_input(
-                "Chunk size (characters)", min_value=2000, step=1000,
-                value=int(st.session_state.get("chunk_chars", 15000)), key="chunk_chars",
-                help="Larger chunks = fewer API calls but may be slower per chunk"
-            )
+            try:
+                max_workers = st.number_input(
+                    "Max parallel workers", min_value=1, max_value=8, step=1,
+                    value=4, help="Number of chunks to process simultaneously. Higher = faster but may hit rate limits."
+                )
+                chunk_chars = st.number_input(
+                    "Chunk size (characters)", min_value=2000, step=1000,
+                    value=int(st.session_state.get("chunk_chars", 15000)), key="chunk_chars",
+                    help="Larger chunks = fewer API calls but may be slower per chunk"
+                )
+            except Exception as exc:
+                st.error(f"❌ **Performance settings failed**: {exc}")
+                max_workers = 4
+                chunk_chars = 15000
         
         with col_opt2:
-            max_pages = st.number_input(
-                "Max pages to read (0 = all)", min_value=0, step=1,
-                value=int(st.session_state.get("max_pages", 0)), key="max_pages",
-            )
-            timeout_s = st.number_input(
-                "Request timeout (seconds)", min_value=5, step=5,
-                value=int(st.session_state.get("timeout_s", 60)), key="timeout_s",
-            )
-            max_tokens = st.number_input(
-                "Max model tokens (output)", min_value=128, step=64,
-                value=int(st.session_state.get("max_tokens", 512)), key="max_tokens",
-            )
+            try:
+                max_pages = st.number_input(
+                    "Max pages to read (0 = all)", min_value=0, step=1,
+                    value=int(st.session_state.get("max_pages", 0)), key="max_pages",
+                )
+                timeout_s = st.number_input(
+                    "Request timeout (seconds)", min_value=5, step=5,
+                    value=int(st.session_state.get("timeout_s", 60)), key="timeout_s",
+                )
+                max_tokens = st.number_input(
+                    "Max model tokens (output)", min_value=128, step=64,
+                    value=int(st.session_state.get("max_tokens", 512)), key="max_tokens",
+                )
+            except Exception as exc:
+                st.error(f"❌ **Performance settings failed**: {exc}")
+                max_pages = 0
+                timeout_s = 60
+                max_tokens = 512
         
         # Performance tips
         st.markdown("""
@@ -987,28 +1100,71 @@ def main() -> None:
         - **Speed up extraction**: Increase chunk size, use parallel workers, limit pages, optimize token limits
         - **Rate limits**: OpenAI ~3-5 req/min (free), Gemini ~15 req/min (free) - adjust workers accordingly
         """)
+    except Exception as exc:
+        st.error(f"❌ **Performance settings failed**: {exc}")
+        st.info("Using default performance settings.")
+    
     uploaded_file = None
     path_input: str = ""
-    if source_mode == "Upload":
-        uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
-    else:
-        path_input = st.text_input("PDF file path", value="", placeholder=r"C:\\path\\to\\file.pdf")
+    try:
+        if source_mode == "Upload":
+            uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+        else:
+            path_input = st.text_input("PDF file path", value="", placeholder=r"C:\\path\\to\\file.pdf")
+    except Exception as exc:
+        st.error(f"❌ **File input failed**: {exc}")
+        st.info("Please try refreshing the page.")
     schema_prompt = st.text_area(
         "Schema / Prompt",
-        value=st.session_state.get("schema_prompt", "extract assembly steps, torque values, and required tools"),
+        value=st.session_state.get("schema_prompt", "Extract steps, values, keywords, etc."),
         height=120,
         key="schema_prompt",
         on_change=lambda: set_persistent_value("schema_prompt", st.session_state.get("schema_prompt", "")),
+        help="Describe what you want to extract from the PDF. Be specific about the types of information, categories, or structure you need.",
     )
+    
+    # Validate schema prompt
+    if schema_prompt and len(schema_prompt.strip()) < 10:
+        st.warning("⚠️ **Schema prompt is very short**. Consider providing more detail about what you want to extract for better results.")
+    
+    # Handle schema prompt changes with error handling
+    try:
+        if "schema_prompt" in st.session_state:
+            set_persistent_value("schema_prompt", st.session_state.get("schema_prompt", ""))
+    except Exception as exc:
+        st.error(f"❌ **Schema prompt save failed**: {exc}")
+        st.info("Your prompt will not be saved for future sessions.")
 
     col_run, col_stop, col_rerun = st.columns([1, 1, 1])
     run = col_run.button("Run Extraction")
     if col_stop.button("Stop"):
-        st.session_state["stop_requested"] = True
-        st.info("Stop requested. It will take effect after the current chunk.")
+        try:
+            st.session_state["stop_requested"] = True
+            st.info("Stop requested. It will take effect after the current chunk.")
+        except Exception as exc:
+            st.error(f"❌ **Stop request failed**: {exc}")
+            st.info("Please try refreshing the page.")
     if col_rerun.button("Rerun"):
-        st.session_state["stop_requested"] = False
-        st.rerun()
+        try:
+            st.session_state["stop_requested"] = False
+            st.rerun()
+        except Exception as exc:
+            st.error(f"❌ **Rerun failed**: {exc}")
+            st.info("Please try refreshing the page.")
+
+    # Initialize variables to avoid scope issues
+    pages = []
+    chunks = []
+    extractions = []
+    was_stopped = False
+    
+    # Validate required environment variables
+    if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        st.error("❌ **OpenAI API Key Required** - Please enter your OpenAI API key in the sidebar.")
+        return
+    elif provider == "gemini" and not os.environ.get("GOOGLE_API_KEY"):
+        st.error("❌ **Google API Key Required** - Please enter your Google API key in the sidebar.")
+        return
 
     if run:
         # Clear any previous stop requests before starting
@@ -1039,8 +1195,12 @@ def main() -> None:
                 st.error(f"Failed to read PDF: {exc}")
                 return
 
+        if not pages:
+            st.error("No pages were read from the PDF.")
+            return
+            
         if not any(p.get("text") for p in pages):
-            st.error("Could not read text from PDF.")
+            st.error("Could not read text from PDF. The file may be corrupted, encrypted, or contain only images.")
             return
 
         # Show PDF reading results
@@ -1050,6 +1210,12 @@ def main() -> None:
             pages = pages[:int(max_pages)]
             st.info(f"Limited to first {len(pages)} pages as per settings")
         
+        # Validate chunk size
+        if chunk_chars < 1000:
+            st.warning("⚠️ Chunk size is very small. This may result in many API calls and slower processing.")
+        elif chunk_chars > 50000:
+            st.warning("⚠️ Chunk size is very large. This may cause timeouts or memory issues.")
+            
         chunks = chunk_text(pages, max_chars=int(chunk_chars))
         st.info(f"Split into {len(chunks)} chunks for processing")
         
@@ -1062,8 +1228,13 @@ def main() -> None:
             estimated_time = estimate_processing_time(chunks, max_workers, timeout_s)
             st.info(f"⏱️ **Estimated processing time**: {estimated_time}")
 
-        with st.spinner("Calling model…"):
-            extractions, was_stopped = run_extraction(provider, model, schema_prompt, chunks, int(timeout_s), int(max_tokens), max_workers)
+        try:
+            with st.spinner("Calling model…"):
+                extractions, was_stopped = run_extraction(provider, model, schema_prompt, chunks, int(timeout_s), int(max_tokens), max_workers)
+        except Exception as exc:
+            st.error(f"❌ **Extraction failed**: {exc}")
+            st.info("💡 **Troubleshooting tips**: Check your API key, reduce chunk size, or try a different model.")
+            return
 
         # Always show results section, even if no extractions
         st.subheader("📊 Structured Results")
@@ -1083,21 +1254,34 @@ def main() -> None:
             col_resume1, col_resume2 = st.columns([1, 3])
             with col_resume1:
                 if st.button("🔄 Resume Extraction", type="primary"):
-                    st.session_state["stop_requested"] = False
-                    st.rerun()
+                    try:
+                        st.session_state["stop_requested"] = False
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"❌ **Resume failed**: {exc}")
+                        st.info("Please try refreshing the page and running extraction again.")
             with col_resume2:
                 st.info("Click 'Resume Extraction' to continue processing remaining chunks from where you left off.")
         else:
             st.success(f"✅ **Complete Results** - All chunks processed successfully. Found {len(extractions)} extractions.")
         
         # Build and display results table
-        df = build_results_table(extractions, pages)
-        st.dataframe(df, use_container_width=True)
+        try:
+            df = build_results_table(extractions, pages)
+            st.dataframe(df, use_container_width=True)
+        except Exception as exc:
+            st.error(f"❌ **Results table generation failed**: {exc}")
+            st.info("Showing raw extraction data instead.")
+            st.json(extractions)
         
         # Generate and display natural language summary
         st.subheader("📝 Natural Language Summary")
-        with st.spinner("Generating summary..."):
-            summary = generate_extraction_summary(provider, model, schema_prompt, extractions, int(timeout_s), int(max_tokens))
+        try:
+            with st.spinner("Generating summary..."):
+                summary = generate_extraction_summary(provider, model, schema_prompt, extractions, int(timeout_s), int(max_tokens))
+        except Exception as exc:
+            st.error(f"❌ **Summary generation failed**: {exc}")
+            summary = "Summary generation failed. Please try again or check your API configuration."
         
         # Display the summary in a nice format
         st.markdown("**AI-Generated Summary:**")
@@ -1105,41 +1289,53 @@ def main() -> None:
         
         # Add a refresh button for the summary
         if st.button("🔄 Regenerate Summary", type="secondary"):
-            with st.spinner("Regenerating summary..."):
-                new_summary = generate_extraction_summary(provider, model, schema_prompt, extractions, int(timeout_s), int(max_tokens))
-                st.markdown("**Updated AI-Generated Summary:**")
-                st.markdown(new_summary)
+            try:
+                with st.spinner("Regenerating summary..."):
+                    new_summary = generate_extraction_summary(provider, model, schema_prompt, extractions, int(timeout_s), int(max_tokens))
+                    st.markdown("**Updated AI-Generated Summary:**")
+                    st.markdown(new_summary)
+            except Exception as exc:
+                st.error(f"❌ **Summary regeneration failed**: {exc}")
+                st.info("Please try again or check your API configuration.")
         
         # Show extraction summary
-        with st.expander("�� Extraction Summary", expanded=False):
-            col_sum1, col_sum2, col_sum3 = st.columns(3)
-            
-            with col_sum1:
-                st.metric("Total Extractions", len(extractions))
-            
-            with col_sum2:
-                unique_classes = len(set(item.get("extraction_class", "") for item in extractions))
-                st.metric("Unique Classes", unique_classes)
-            
-            with col_sum3:
-                total_pages = len(set(page for item in extractions for page in item.get("pages", [])))
-                st.metric("Pages Covered", total_pages)
-            
-            # Show extraction class breakdown
-            class_counts = {}
-            for item in extractions:
-                class_name = item.get("extraction_class", "Unknown")
-                class_counts[class_name] = class_counts.get(class_name, 0) + 1
-            
-            if class_counts:
-                st.markdown("**Extraction Class Breakdown:**")
-                for class_name, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
-                    st.markdown(f"- **{class_name}**: {count} items")
+        with st.expander("📊 Extraction Summary", expanded=False):
+            try:
+                col_sum1, col_sum2, col_sum3 = st.columns(3)
+                
+                with col_sum1:
+                    st.metric("Total Extractions", len(extractions))
+                
+                with col_sum2:
+                    unique_classes = len(set(item.get("extraction_class", "") for item in extractions))
+                    st.metric("Unique Classes", unique_classes)
+                
+                with col_sum3:
+                    total_pages = len(set(page for item in extractions for page in item.get("pages", [])))
+                    st.metric("Pages Covered", total_pages)
+                
+                # Show extraction class breakdown
+                class_counts = {}
+                for item in extractions:
+                    class_name = item.get("extraction_class", "Unknown")
+                    class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                
+                if class_counts:
+                    st.markdown("**Extraction Class Breakdown:**")
+                    for class_name, count in sorted(class_counts.items(), key=lambda x: x[1], reverse=True):
+                        st.markdown(f"- **{class_name}**: {count} items")
+            except Exception as exc:
+                st.error(f"❌ **Summary metrics failed**: {exc}")
+                st.info("Basic extraction count: {len(extractions)} items found")
 
         # Show highlighted context
         st.subheader("🔍 Highlighted Context")
-        page_to_spans = compute_highlight_spans(extractions, pages)
-        render_highlighted_text(pages, page_to_spans)
+        try:
+            page_to_spans = compute_highlight_spans(extractions, pages)
+            render_highlighted_text(pages, page_to_spans)
+        except Exception as exc:
+            st.error(f"❌ **Context highlighting failed**: {exc}")
+            st.info("The results table above still shows all extractions with their source citations.")
 
 
 if __name__ == "__main__":
